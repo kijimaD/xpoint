@@ -1,7 +1,7 @@
 package ruler
 
 import (
-	"log"
+	"log/slog"
 
 	"github.com/BurntSushi/xgb"
 	"github.com/BurntSushi/xgb/xproto"
@@ -110,7 +110,9 @@ func (c HideModeConfig) CreateWindows(xuConn *xgbutil.XUtil, screenWidth, screen
 	}
 	windows[3] = bottomWin
 
+	// 全ウィンドウにプロパティを設定
 	for _, win := range windows {
+		setWindowProperties(xuConn, win, "xruler", "xruler")
 		win.Map()
 	}
 
@@ -145,7 +147,7 @@ func (c HideModeConfig) UpdateWindows(xConn *xgb.Conn, windows []*xwindow.Window
 		if err := xproto.ConfigureWindowChecked(xConn, topID,
 			xproto.ConfigWindowX|xproto.ConfigWindowY|xproto.ConfigWindowWidth|xproto.ConfigWindowHeight,
 			[]uint32{uint32(leftEdge), uint32(topStart), uint32(width), uint32(topHeight)}).Check(); err != nil {
-			log.Printf("topウィンドウ更新エラー: %v", err)
+			slog.Error("topウィンドウ更新エラー", "error", err)
 		}
 	}
 
@@ -154,7 +156,7 @@ func (c HideModeConfig) UpdateWindows(xConn *xgb.Conn, windows []*xwindow.Window
 		if err := xproto.ConfigureWindowChecked(xConn, topBorderID,
 			xproto.ConfigWindowX|xproto.ConfigWindowY|xproto.ConfigWindowWidth|xproto.ConfigWindowHeight,
 			[]uint32{uint32(leftEdge), uint32(cursorTop), uint32(width), uint32(c.BorderHeight)}).Check(); err != nil {
-			log.Printf("top枠線ウィンドウ更新エラー: %v", err)
+			slog.Error("top枠線ウィンドウ更新エラー", "error", err)
 		}
 	}
 
@@ -163,7 +165,7 @@ func (c HideModeConfig) UpdateWindows(xConn *xgb.Conn, windows []*xwindow.Window
 		if err := xproto.ConfigureWindowChecked(xConn, bottomBorderID,
 			xproto.ConfigWindowX|xproto.ConfigWindowY|xproto.ConfigWindowWidth|xproto.ConfigWindowHeight,
 			[]uint32{uint32(leftEdge), uint32(cursorBottom - c.BorderHeight), uint32(width), uint32(c.BorderHeight)}).Check(); err != nil {
-			log.Printf("bottom枠線ウィンドウ更新エラー: %v", err)
+			slog.Error("bottom枠線ウィンドウ更新エラー", "error", err)
 		}
 	}
 
@@ -172,7 +174,7 @@ func (c HideModeConfig) UpdateWindows(xConn *xgb.Conn, windows []*xwindow.Window
 		if err := xproto.ConfigureWindowChecked(xConn, bottomID,
 			xproto.ConfigWindowX|xproto.ConfigWindowY|xproto.ConfigWindowWidth|xproto.ConfigWindowHeight,
 			[]uint32{uint32(leftEdge), uint32(bottomStart), uint32(width), uint32(bottomHeight)}).Check(); err != nil {
-			log.Printf("bottomウィンドウ更新エラー: %v", err)
+			slog.Error("bottomウィンドウ更新エラー", "error", err)
 		}
 	}
 }

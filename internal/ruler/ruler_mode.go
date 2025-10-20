@@ -46,11 +46,59 @@ func (c RulerModeConfig) CreateWindows(xuConn *xgbutil.XUtil, screenWidth, scree
 	); err != nil {
 		return nil, err
 	}
+
+	// ウィンドウ名とクラス名を設定（compton等のコンポジタで識別可能に）
+	setWindowProperties(xuConn, topWin, "xruler", "xruler")
+
 	windows[0] = topWin
 
 	topWin.Map()
 
 	return windows, nil
+}
+
+// setWindowProperties ウィンドウのWM_NAMEとWM_CLASSを設定
+func setWindowProperties(xuConn *xgbutil.XUtil, win *xwindow.Window, name, class string) {
+	winID := xproto.Window(win.Id)
+
+	// WM_NAME を設定
+	xproto.ChangeProperty(
+		xuConn.Conn(),
+		xproto.PropModeReplace,
+		winID,
+		xproto.AtomWmName,
+		xproto.AtomString,
+		8,
+		uint32(len(name)),
+		[]byte(name),
+	)
+
+	// _NET_WM_NAME を設定（UTF-8）
+	netWmNameAtom, _ := xproto.InternAtom(xuConn.Conn(), true, uint16(len("_NET_WM_NAME")), "_NET_WM_NAME").Reply()
+	utf8StringAtom, _ := xproto.InternAtom(xuConn.Conn(), true, uint16(len("UTF8_STRING")), "UTF8_STRING").Reply()
+	xproto.ChangeProperty(
+		xuConn.Conn(),
+		xproto.PropModeReplace,
+		winID,
+		netWmNameAtom.Atom,
+		utf8StringAtom.Atom,
+		8,
+		uint32(len(name)),
+		[]byte(name),
+	)
+
+	// WM_CLASS を設定（instance\0class\0形式）
+	wmClass := class + "\x00" + class + "\x00"
+	xproto.ChangeProperty(
+		xuConn.Conn(),
+		xproto.PropModeReplace,
+		winID,
+		xproto.AtomWmClass,
+		xproto.AtomString,
+		8,
+		uint32(len(wmClass)),
+		[]byte(wmClass),
+	)
 }
 
 // UpdateWindows カーソル位置に応じてウィンドウを更新

@@ -1,7 +1,7 @@
 package trail
 
 import (
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/BurntSushi/xgb"
@@ -76,7 +76,7 @@ func (m *Manager) Add(x1, y1, x2, y2 int) {
 	// ウィンドウを生成
 	win, err := xwindow.Generate(m.xuConn)
 	if err != nil {
-		log.Println("軌跡ウィンドウ生成エラー:", err)
+		slog.Error("軌跡ウィンドウ生成エラー", "error", err)
 		return
 	}
 
@@ -88,7 +88,7 @@ func (m *Manager) Add(x1, y1, x2, y2 int) {
 		0xff0000, // 黒背景（SHAPEマスクで隠される）
 		1,
 	); err != nil {
-		log.Println("軌跡ウィンドウ作成エラー:", err)
+		slog.Error("軌跡ウィンドウ作成エラー", "error", err)
 		return
 	}
 
@@ -101,7 +101,7 @@ func (m *Manager) Add(x1, y1, x2, y2 int) {
 		xproto.GcForeground|xproto.GcLineWidth|xproto.GcCapStyle|xproto.GcJoinStyle,
 		[]uint32{Color, LineWidth, xproto.CapStyleRound, xproto.JoinStyleRound},
 	).Check(); err != nil {
-		log.Println("GC作成エラー:", err)
+		slog.Error("GC作成エラー", "error", err)
 		return
 	}
 
@@ -129,7 +129,7 @@ func (m *Manager) Add(x1, y1, x2, y2 int) {
 		uint16(width),
 		uint16(height),
 	).Check(); err != nil {
-		log.Println("マスクPixmap作成エラー:", err)
+		slog.Error("マスクPixmap作成エラー", "error", err)
 		return
 	}
 
@@ -141,7 +141,7 @@ func (m *Manager) Add(x1, y1, x2, y2 int) {
 		xproto.GcForeground|xproto.GcBackground,
 		[]uint32{0, 0},
 	).Check(); err != nil {
-		log.Println("マスクGC作成エラー:", err)
+		slog.Error("マスクGC作成エラー", "error", err)
 		return
 	}
 
@@ -169,7 +169,7 @@ func (m *Manager) Add(x1, y1, x2, y2 int) {
 
 	// マスクを適用
 	if err := shape.Init(m.xConn); err != nil {
-		log.Println("Shape拡張初期化エラー:", err)
+		slog.Error("Shape拡張初期化エラー", "error", err)
 		return
 	}
 	shape.Mask(
@@ -204,19 +204,19 @@ func (m *Manager) Add(x1, y1, x2, y2 int) {
 func (m *Manager) setupWindowClickThrough(win *xwindow.Window) {
 	region, err := xfixes.NewRegionId(m.xConn)
 	if err != nil {
-		log.Println("軌跡クリックスルー設定エラー(NewRegionId):", err)
+		slog.Error("軌跡クリックスルー設定エラー(NewRegionId)", "error", err)
 		return
 	}
 	defer xfixes.DestroyRegion(m.xConn, region)
 
 	if err := xfixes.CreateRegionChecked(m.xConn, region, []xproto.Rectangle{{}}).Check(); err != nil {
-		log.Println("軌跡クリックスルー設定エラー(CreateRegion):", err)
+		slog.Error("軌跡クリックスルー設定エラー(CreateRegion)", "error", err)
 		return
 	}
 
 	winID := xproto.Window(win.Id)
 	if err := xfixes.SetWindowShapeRegionChecked(m.xConn, winID, shape.SkInput, 0, 0, region).Check(); err != nil {
-		log.Println("軌跡クリックスルー設定エラー(SetWindowShapeRegion):", err)
+		slog.Error("軌跡クリックスルー設定エラー(SetWindowShapeRegion)", "error", err)
 		return
 	}
 }

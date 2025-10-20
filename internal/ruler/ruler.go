@@ -1,7 +1,7 @@
 package ruler
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,24 +17,27 @@ import (
 )
 
 const (
-	PollInterval    = 16 * time.Millisecond    // カーソル位置のポーリング間隔（約60fps）
-	xfixesMajor     = 6                        // XFixes拡張のメジャーバージョン
-	xfixesMinor     = 0                        // XFixes拡張のマイナーバージョン
-	extensionXFIXES = "XFIXES"                 // XFixes拡張の名前
+	PollInterval    = 16 * time.Millisecond // カーソル位置のポーリング間隔（約60fps）
+	xfixesMajor     = 6                     // XFixes拡張のメジャーバージョン
+	xfixesMinor     = 0                     // XFixes拡張のマイナーバージョン
+	extensionXFIXES = "XFIXES"              // XFixes拡張の名前
 	atomOpacity     = "_NET_WM_WINDOW_OPACITY" // ウィンドウ不透明度を設定するアトム名
 )
 
 // Ruler X Window System上でカーソル位置を追従する水平ルーラー
 type Ruler struct {
-	xConn        *xgb.Conn         // X11プロトコル接続
-	xuConn       *xgbutil.XUtil    // xgbutilユーティリティ接続
-	windows      []*xwindow.Window // ウィンドウリスト
-	screenWidth  int               // 画面の幅
-	screenHeight int               // 画面の高さ
-	mode         Mode              // 動作モード
-	visible      bool              // 表示状態
-	trailMgr     *trail.Manager    // 軌跡管理
-	mu           sync.Mutex        // ウィンドウ操作の排他制御
+	xConn           *xgb.Conn         // X11プロトコル接続
+	xuConn          *xgbutil.XUtil    // xgbutilユーティリティ接続
+	windows         []*xwindow.Window // ウィンドウリスト
+	screenWidth     int               // 画面の幅
+	screenHeight    int               // 画面の高さ
+	mode            Mode              // 動作モード
+	visible         bool              // 表示状態
+	trailMgr        *trail.Manager    // 軌跡管理
+	mu              sync.Mutex        // ウィンドウ操作の排他制御
+	toggling        bool              // トグル処理中フラグ
+	xeventHealthy   bool              // xevent.Mainの健全性
+	lastKeybindTest time.Time         // 最後のキーバインドテスト時刻
 }
 
 // New ルーラーを作成
@@ -52,38 +55,119 @@ func (r *Ruler) Close() {
 	}
 }
 
+// runXEventMain xevent.Mainをpanic recoveryで実行し、クラッシュ時に再起動
+func (r *Ruler) runXEventMain() {
+	defer func() {
+		if err := recover(); err != nil {
+			slog.Error("xevent.Main panic", "error", err)
+			r.mu.Lock()
+			r.xeventHealthy = false
+			r.mu.Unlock()
+
+			// 1秒待ってから再起動
+			time.Sleep(1 * time.Second)
+			slog.Warn("xevent.Main 再起動中...")
+
+			// キーバインドを再設定
+			if err := r.setupKeyboard(); err != nil {
+				slog.Error("キーバインド再設定エラー", "error", err)
+			}
+
+			r.mu.Lock()
+			r.xeventHealthy = true
+			r.mu.Unlock()
+
+			// 再帰的に再起動
+			go r.runXEventMain()
+		}
+	}()
+
+	r.mu.Lock()
+	r.xeventHealthy = true
+	r.mu.Unlock()
+
+	slog.Info("xevent.Main 起動")
+	xevent.Main(r.xuConn)
+	slog.Info("xevent.Main 終了（正常終了の場合）")
+}
+
 // Run メインループ：カーソル位置を追従してウィンドウ位置を更新
 func (r *Ruler) Run() {
 	var lastY int = -1
 
-	go xevent.Main(r.xuConn)
+	// panic recoveryを含むxevent.Mainを起動
+	go r.runXEventMain()
+
+	// 定期的にキーバインドの健全性をチェック
+	keybindCheckTicker := time.NewTicker(10 * time.Second)
+	defer keybindCheckTicker.Stop()
+
+	go func() {
+		for range keybindCheckTicker.C {
+			r.mu.Lock()
+			healthy := r.xeventHealthy
+			lastTest := r.lastKeybindTest
+			r.mu.Unlock()
+
+			if !healthy {
+				slog.Warn("xevent.Mainが停止しています")
+			}
+
+			// 60秒以上キーバインドが呼ばれていない場合は警告
+			if time.Since(lastTest) > 60*time.Second && !lastTest.IsZero() {
+				slog.Warn("キーバインドが60秒以上呼ばれていません", "last_test", lastTest.Format("15:04:05"))
+			}
+		}
+	}()
 
 	for {
-		// カーソル位置を取得
-		cx, cy := r.getCursor()
-
-		// 位置が変わった時のみ更新（不要な描画を削減）
-		if cy != lastY {
-			r.mu.Lock()
-			if r.visible && len(r.windows) > 0 {
-				r.mode.UpdateWindows(r.xConn, r.windows, cx, cy, r.screenWidth, r.screenHeight)
-			}
-			r.mu.Unlock()
-			lastY = cy
-		}
-
-		// カーソルが移動したら軌跡を追加
-		lastX, lastY := r.trailMgr.GetLastPosition()
-		if cx != lastX || cy != lastY {
-			if r.visible && lastX != -1 && lastY != -1 {
-				if r.trailMgr.ShouldAdd(cx, cy) {
-					r.trailMgr.Add(lastX, lastY, cx, cy)
+		// panic recovery
+		func() {
+			defer func() {
+				if err := recover(); err != nil {
+					slog.Error("メインループ panic", "error", err)
 				}
-			}
-			r.trailMgr.UpdatePosition(cx, cy)
-		}
+			}()
 
-		r.trailMgr.Update()
+			// カーソル位置を取得
+			cx, cy, err := r.getCursor()
+			if err != nil {
+				slog.Error("カーソル位置取得エラー", "error", err)
+				return
+			}
+
+			// 位置が変わった時のみ更新（不要な描画を削減）
+			if cy != lastY {
+				r.mu.Lock()
+				visible := r.visible
+				windowsLen := len(r.windows)
+				r.mu.Unlock()
+
+				if visible && windowsLen > 0 {
+					// mutex外でUpdateWindowsを実行（長時間ロックを避ける）
+					r.mode.UpdateWindows(r.xConn, r.windows, cx, cy, r.screenWidth, r.screenHeight)
+				}
+				lastY = cy
+			}
+
+			// カーソルが移動したら軌跡を追加
+			lastX, lastY := r.trailMgr.GetLastPosition()
+			if cx != lastX || cy != lastY {
+				r.mu.Lock()
+				visible := r.visible
+				r.mu.Unlock()
+
+				if visible && lastX != -1 && lastY != -1 {
+					if r.trailMgr.ShouldAdd(cx, cy) {
+						r.trailMgr.Add(lastX, lastY, cx, cy)
+					}
+				}
+				r.trailMgr.UpdatePosition(cx, cy)
+			}
+
+			r.trailMgr.Update()
+		}()
+
 		time.Sleep(PollInterval)
 	}
 }
@@ -142,6 +226,10 @@ func (r *Ruler) setupKeyboard() error {
 	// ルートウィンドウでグローバルにキーをキャプチャ
 	err := keybind.KeyPressFun(
 		func(X *xgbutil.XUtil, e xevent.KeyPressEvent) {
+			slog.Debug("キーバインドコールバック呼び出し")
+			r.mu.Lock()
+			r.lastKeybindTest = time.Now()
+			r.mu.Unlock()
 			r.toggleVisibility()
 		}).Connect(r.xuConn, r.xuConn.RootWin(), "Control-Shift-space", true)
 
@@ -149,63 +237,83 @@ func (r *Ruler) setupKeyboard() error {
 		return err
 	}
 
-	log.Println("キーバインド設定完了: Ctrl+Shift+Space でトグル")
+	slog.Info("キーバインド設定完了: Ctrl+Shift+Space でトグル")
 
 	return nil
 }
 
-// toggleVisibility 表示状態を切り替え（表示時は再作成）
+// toggleVisibility 表示状態を切り替え（guake方式: Map/Unmapのみ）
 func (r *Ruler) toggleVisibility() {
+	slog.Info("toggleVisibility 呼び出し")
+
+	// すでに処理中なら無視
+	r.mu.Lock()
+	if r.toggling {
+		slog.Debug("処理中のため無視")
+		r.mu.Unlock()
+		return
+	}
+	r.toggling = true
+	r.mu.Unlock()
+
 	go func() {
+		defer func() {
+			if err := recover(); err != nil {
+				slog.Error("toggleVisibility panic", "error", err)
+			}
+			r.mu.Lock()
+			r.toggling = false
+			r.mu.Unlock()
+		}()
+
+		slog.Debug("goroutine: mutex取得待ち...")
 		r.mu.Lock()
+		slog.Debug("goroutine: mutex取得完了")
 		defer r.mu.Unlock()
 
+		// 可視状態を切り替え
 		r.visible = !r.visible
+		slog.Info("可視状態変更", "visible", r.visible)
 
 		if r.visible {
-			// 既存のウィンドウを破棄
-			for _, win := range r.windows {
-				win.Unmap()
-				win.Destroy()
-			}
-
-			// 軌跡マネージャをクリーンアップ
+			slog.Debug("[1/5] 軌跡をクリア中...")
+			// 軌跡をクリア
 			if r.trailMgr != nil {
 				r.trailMgr.Clear()
 			}
 
-			r.xConn.Sync()
-
-			// ウィンドウを再作成
-			if err := r.createWindows(); err != nil {
-				log.Printf("ウィンドウ再作成エラー: %v", err)
-				return
+			slog.Debug("[2/5] ウィンドウを表示中", "count", len(r.windows))
+			// ウィンドウを表示
+			for i, win := range r.windows {
+				slog.Debug("ウィンドウをMap中", "index", i+1, "total", len(r.windows))
+				win.Map()
 			}
 
-			// クリックスルー再設定
-			if err := r.setupClickThrough(); err != nil {
-				log.Printf("クリックスルー再設定エラー: %v", err)
-				return
-			}
-
-			// 透明度を再設定
-			if err := r.setupTransparency(); err != nil {
-				log.Printf("透明度再設定エラー: %v", err)
-				return
-			}
-
+			slog.Debug("[3/5] カーソル位置取得中...")
 			// 現在のカーソル位置でウィンドウを更新
-			cx, cy := r.getCursor()
-			if cx != -1 && cy != -1 {
-				r.mode.UpdateWindows(r.xConn, r.windows, cx, cy, r.screenWidth, r.screenHeight)
+			cx, cy, err := r.getCursor()
+			if err != nil {
+				slog.Error("カーソル位置取得エラー", "error", err)
+			} else {
+				slog.Debug("[4/5] ウィンドウ位置更新中", "cursor_x", cx, "cursor_y", cy)
+				if cx != -1 && cy != -1 {
+					r.mode.UpdateWindows(r.xConn, r.windows, cx, cy, r.screenWidth, r.screenHeight)
+				}
 			}
 
-			log.Println("ルーラー表示: ON")
+			slog.Debug("[5/5] Sync中...")
+			r.xConn.Sync()
+			slog.Info("ルーラー表示: ON")
 		} else {
-			for _, win := range r.windows {
+			slog.Debug("[1/2] ウィンドウを非表示中", "count", len(r.windows))
+			// ウィンドウを非表示
+			for i, win := range r.windows {
+				slog.Debug("ウィンドウをUnmap中", "index", i+1, "total", len(r.windows))
 				win.Unmap()
 			}
-			log.Println("ルーラー表示: OFF")
+			slog.Debug("[2/2] Sync中...")
+			r.xConn.Sync()
+			slog.Info("ルーラー表示: OFF")
 		}
 	}()
 }
@@ -299,14 +407,14 @@ func (r *Ruler) setupTransparency() error {
 	return nil
 }
 
-func (r *Ruler) getCursor() (int, int) {
+func (r *Ruler) getCursor() (int, int, error) {
 	setup := xproto.Setup(r.xConn)
 	root := setup.DefaultScreen(r.xConn).Root
 
 	reply, err := xproto.QueryPointer(r.xConn, root).Reply()
 	if err != nil {
-		log.Fatal(err)
+		return 0, 0, err
 	}
 
-	return int(reply.RootX), int(reply.RootY)
+	return int(reply.RootX), int(reply.RootY), nil
 }
