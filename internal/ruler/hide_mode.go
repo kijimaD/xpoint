@@ -29,7 +29,7 @@ func DefaultHideModeConfig() HideModeConfig {
 		BorderHeight:   2,
 		OverlayColor:   0xf0f0f0,
 		BorderColor:    0x000000,
-		OpacityPercent: 100,
+		OpacityPercent: 96,
 	}
 }
 
