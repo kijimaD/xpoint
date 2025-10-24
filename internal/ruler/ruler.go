@@ -38,6 +38,8 @@ type Ruler struct {
 	toggling        bool              // トグル処理中フラグ
 	xeventHealthy   bool              // xevent.Mainの健全性
 	lastKeybindTest time.Time         // 最後のキーバインドテスト時刻
+	errorCount      int               // 連続エラーカウント
+	reinitializing  bool              // 再初期化中フラグ
 }
 
 // New ルーラーを作成
@@ -136,8 +138,28 @@ func (r *Ruler) Run() {
 			cx, cy, err := r.getCursor()
 			if err != nil {
 				slog.Error("カーソル位置取得エラー", "error", err)
+
+				// エラーカウントを増やす
+				r.mu.Lock()
+				r.errorCount++
+				errCount := r.errorCount
+				reinit := r.reinitializing
+				r.mu.Unlock()
+
+				// 連続10回エラーが発生したら再初期化
+				if errCount >= 10 && !reinit {
+					slog.Warn("連続エラー検出。X接続を再初期化します", "error_count", errCount)
+					go r.reinitialize()
+				}
 				return
 			}
+
+			// 正常に取得できたらエラーカウントをリセット
+			r.mu.Lock()
+			if r.errorCount > 0 {
+				r.errorCount = 0
+			}
+			r.mu.Unlock()
 
 			// 位置が変わった時のみ更新（不要な描画を削減）
 			if cy != lastY {
@@ -219,6 +241,105 @@ func (r *Ruler) Init() error {
 	}
 
 	return nil
+}
+
+// reinitialize X接続とウィンドウを再初期化（サスペンド復帰時など）
+func (r *Ruler) reinitialize() {
+	r.mu.Lock()
+	if r.reinitializing {
+		r.mu.Unlock()
+		return
+	}
+	r.reinitializing = true
+	wasVisible := r.visible
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		r.reinitializing = false
+		r.errorCount = 0
+		r.mu.Unlock()
+	}()
+
+	slog.Info("X接続の再初期化を開始")
+
+	// 古い接続を閉じる
+	if r.xConn != nil {
+		r.xConn.Close()
+	}
+
+	// 少し待機
+	time.Sleep(500 * time.Millisecond)
+
+	// X接続を再確立
+	var err error
+	r.xConn, err = xgb.NewConn()
+	if err != nil {
+		slog.Error("X接続の再確立に失敗", "error", err)
+		return
+	}
+	r.xConn.Sync()
+
+	r.xuConn, err = xgbutil.NewConn()
+	if err != nil {
+		slog.Error("xgbutil接続の再確立に失敗", "error", err)
+		return
+	}
+
+	// 画面サイズを再取得
+	r.screenWidth, r.screenHeight = r.getScreenSize()
+
+	// 軌跡マネージャを再初期化
+	trailMgr := trail.NewManager(r.xConn, r.xuConn)
+
+	// ウィンドウを再作成
+	newWindows, err := r.mode.CreateWindows(r.xuConn, r.screenWidth, r.screenHeight)
+	if err != nil {
+		slog.Error("ウィンドウ再作成に失敗", "error", err)
+		return
+	}
+	r.xConn.Sync()
+
+	// クリックスルー設定（mutexロック前に実行）
+	if err := r.setupClickThroughForWindows(newWindows); err != nil {
+		slog.Error("クリックスルー設定に失敗", "error", err)
+		return
+	}
+
+	// 透明度を設定（mutexロック前に実行）
+	if err := r.setupTransparencyForWindows(newWindows); err != nil {
+		slog.Error("透明度設定に失敗", "error", err)
+		return
+	}
+
+	// mutexで保護して代入
+	r.mu.Lock()
+	r.trailMgr = trailMgr
+	r.windows = newWindows
+	r.mu.Unlock()
+
+	// キーバインドを再設定
+	if err := r.setupKeyboard(); err != nil {
+		slog.Error("キーバインド設定に失敗", "error", err)
+		return
+	}
+
+	// xevent.Mainを再起動
+	go r.runXEventMain()
+
+	// 元の表示状態に応じてウィンドウを表示/非表示
+	r.mu.Lock()
+	r.visible = wasVisible
+	r.mu.Unlock()
+
+	if wasVisible {
+		for _, win := range r.windows {
+			win.Map()
+		}
+		r.xConn.Sync()
+	}
+
+	slog.Info("X接続の再初期化完了")
 }
 
 // setupKeyboard キーボードイベントを設定
@@ -340,6 +461,10 @@ func (r *Ruler) getScreenSize() (int, int) {
 }
 
 func (r *Ruler) setupClickThrough() error {
+	return r.setupClickThroughForWindows(r.windows)
+}
+
+func (r *Ruler) setupClickThroughForWindows(windows []*xwindow.Window) error {
 	extension, err := xproto.QueryExtension(r.xConn, uint16(len(extensionXFIXES)), extensionXFIXES).Reply()
 	if err != nil || !extension.Present {
 		return err
@@ -363,7 +488,7 @@ func (r *Ruler) setupClickThrough() error {
 		return err
 	}
 
-	for _, win := range r.windows {
+	for _, win := range windows {
 		winID := xproto.Window(win.Id)
 		if err := xfixes.SetWindowShapeRegionChecked(r.xConn, winID, shape.SkInput, 0, 0, region).Check(); err != nil {
 			return err
@@ -374,6 +499,10 @@ func (r *Ruler) setupClickThrough() error {
 }
 
 func (r *Ruler) setupTransparency() error {
+	return r.setupTransparencyForWindows(r.windows)
+}
+
+func (r *Ruler) setupTransparencyForWindows(windows []*xwindow.Window) error {
 	atom, err := xproto.InternAtom(r.xConn, true, uint16(len(atomOpacity)), atomOpacity).Reply()
 	if err != nil {
 		return err
@@ -391,7 +520,7 @@ func (r *Ruler) setupTransparency() error {
 		byte((opacityValue >> 24) & 0xFF),
 	}
 
-	for _, win := range r.windows {
+	for _, win := range windows {
 		winID := xproto.Window(win.Id)
 		if err := xproto.ChangePropertyChecked(
 			r.xConn,
