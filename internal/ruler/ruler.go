@@ -8,6 +8,7 @@ import (
 	"github.com/BurntSushi/xgb"
 	"github.com/BurntSushi/xgb/shape"
 	"github.com/BurntSushi/xgb/xfixes"
+	"github.com/BurntSushi/xgb/xinerama"
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/keybind"
@@ -17,10 +18,10 @@ import (
 )
 
 const (
-	PollInterval    = 16 * time.Millisecond // カーソル位置のポーリング間隔（約60fps）
-	xfixesMajor     = 6                     // XFixes拡張のメジャーバージョン
-	xfixesMinor     = 0                     // XFixes拡張のマイナーバージョン
-	extensionXFIXES = "XFIXES"              // XFixes拡張の名前
+	PollInterval    = 16 * time.Millisecond    // カーソル位置のポーリング間隔（約60fps）
+	xfixesMajor     = 6                        // XFixes拡張のメジャーバージョン
+	xfixesMinor     = 0                        // XFixes拡張のマイナーバージョン
+	extensionXFIXES = "XFIXES"                 // XFixes拡張の名前
 	atomOpacity     = "_NET_WM_WINDOW_OPACITY" // ウィンドウ不透明度を設定するアトム名
 )
 
@@ -455,8 +456,45 @@ func (r *Ruler) createWindows() error {
 }
 
 func (r *Ruler) getScreenSize() (int, int) {
+	if err := xinerama.Init(r.xConn); err == nil {
+		// Xineramaが有効かチェック
+		if active, err := xinerama.IsActive(r.xConn).Reply(); err == nil && active.State != 0 {
+			// すべてのスクリーン情報を取得
+			if screens, err := xinerama.QueryScreens(r.xConn).Reply(); err == nil && len(screens.ScreenInfo) > 0 {
+				// すべてのスクリーンをカバーする仮想画面サイズを計算
+				minX, minY := screens.ScreenInfo[0].XOrg, screens.ScreenInfo[0].YOrg
+				maxX := screens.ScreenInfo[0].XOrg + int16(screens.ScreenInfo[0].Width)
+				maxY := screens.ScreenInfo[0].YOrg + int16(screens.ScreenInfo[0].Height)
+
+				for _, screen := range screens.ScreenInfo[1:] {
+					if screen.XOrg < minX {
+						minX = screen.XOrg
+					}
+					if screen.YOrg < minY {
+						minY = screen.YOrg
+					}
+					rightEdge := screen.XOrg + int16(screen.Width)
+					bottomEdge := screen.YOrg + int16(screen.Height)
+					if rightEdge > maxX {
+						maxX = rightEdge
+					}
+					if bottomEdge > maxY {
+						maxY = bottomEdge
+					}
+				}
+
+				totalWidth := int(maxX - minX)
+				totalHeight := int(maxY - minY)
+				slog.Info("Xinerama検出", "screens", len(screens.ScreenInfo), "total_width", totalWidth, "total_height", totalHeight)
+				return totalWidth, totalHeight
+			}
+		}
+	}
+
+	// Xineramaが使えない場合はデフォルトスクリーンを使用
 	setup := xproto.Setup(r.xConn)
 	screen := setup.DefaultScreen(r.xConn)
+	slog.Info("デフォルトスクリーン使用", "width", screen.WidthInPixels, "height", screen.HeightInPixels)
 	return int(screen.WidthInPixels), int(screen.HeightInPixels)
 }
 
