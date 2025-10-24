@@ -60,26 +60,29 @@ func (r *Ruler) runXEventMain() {
 	defer func() {
 		if err := recover(); err != nil {
 			slog.Error("xevent.Main panic", "error", err)
-			r.mu.Lock()
-			r.xeventHealthy = false
-			r.mu.Unlock()
-
-			// 1秒待ってから再起動
-			time.Sleep(1 * time.Second)
-			slog.Warn("xevent.Main 再起動中...")
-
-			// キーバインドを再設定
-			if err := r.setupKeyboard(); err != nil {
-				slog.Error("キーバインド再設定エラー", "error", err)
-			}
-
-			r.mu.Lock()
-			r.xeventHealthy = true
-			r.mu.Unlock()
-
-			// 再帰的に再起動
-			go r.runXEventMain()
 		}
+
+		// panic時も正常終了時も、xeventを停止状態にして再起動
+		r.mu.Lock()
+		r.xeventHealthy = false
+		r.mu.Unlock()
+
+		slog.Warn("xevent.Main 停止検出。再起動中...")
+
+		// 1秒待ってから再起動
+		time.Sleep(1 * time.Second)
+
+		// キーバインドを再設定
+		if err := r.setupKeyboard(); err != nil {
+			slog.Error("キーバインド再設定エラー", "error", err)
+		}
+
+		r.mu.Lock()
+		r.xeventHealthy = true
+		r.mu.Unlock()
+
+		// 再帰的に再起動
+		go r.runXEventMain()
 	}()
 
 	r.mu.Lock()
@@ -88,7 +91,7 @@ func (r *Ruler) runXEventMain() {
 
 	slog.Info("xevent.Main 起動")
 	xevent.Main(r.xuConn)
-	slog.Info("xevent.Main 終了（正常終了の場合）")
+	slog.Info("xevent.Main 終了（正常終了）")
 }
 
 // Run メインループ：カーソル位置を追従してウィンドウ位置を更新
